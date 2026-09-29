@@ -17,7 +17,6 @@ LOGGING_CONFIG = {
         "standard": {
             "format": "%(asctime)s - %(levelname)s - %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
-            "converter": beijing_time_converter,
         },
     },
     "handlers": {
@@ -36,5 +35,6 @@ LOGGING_CONFIG = {
 
 def init_logger():
     """初始化日志"""
+    logging.Formatter.converter = staticmethod(beijing_time_converter)
     logging.config.dictConfig(LOGGING_CONFIG)
     return logging.getLogger()
