@@ -16,6 +16,9 @@ jobs:
   build:
     name: glados checkin
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      failure_summary: ${{ steps.checkin.outputs.failure_summary }}
     strategy:
       matrix:
         python-version: [3.8]
@@ -37,6 +40,7 @@ jobs:
 
     # 执行 签到脚本
     - name: running checkin
+      id: checkin
       run: |
         python checkin.py
       env:
@@ -56,4 +60,19 @@ jobs:
         retain_days: 7
         keep_minimum_runs: 10
         delete_run_by_conclusion_pattern: success
+
+  notify-failure:
+    name: Telegram failure notification
+    needs: build
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Send Telegram failure alert
+        run: python3 scripts/notify_telegram.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CHECKIN_FAILURE_SUMMARY: ${{ needs.build.outputs.failure_summary }}
  
