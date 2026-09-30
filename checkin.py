@@ -566,13 +566,62 @@ class Checker:
         content = "\n".join(content_lines)
         return title, content
 
+    def get_failed_cookies(self) -> List[int]:
+        """获取所有签到失败的 Cookie 序号列表"""
+        cookie_count = len(self.config.cookies_list) if self.config else 0
+        return get_failed_cookies(cookie_count, self.results)
+
 
 # 初始化日志
 logger = init_logger()
 
 
-def main():
+def get_failed_cookies(
+    cookies_count: int, results: List[Union[CheckinResult, Dict]]
+) -> List[int]:
+    """返回所有签到失败的 Cookie 序号列表（1-based）。
+
+    每个 Cookie 若任一域名结果 status 精确为 '签到成功' 或 '重复签到' 就算该账号成功，否则失败。
+    """
+    failed = []
+    for idx in range(1, cookies_count + 1):
+        account_results = [
+            r
+            for r in results
+            if (
+                r.cookie_index
+                if hasattr(r, "cookie_index")
+                else r.get("cookie_index")
+            )
+            == idx
+        ]
+        has_success = any(
+            (r.status if hasattr(r, "status") else r.get("status"))
+            in ("签到成功", "重复签到")
+            for r in account_results
+        )
+        if not has_success:
+            failed.append(idx)
+    return failed
+
+
+def set_github_output(key: str, value: str) -> None:
+    """写入 GitHub Actions 输出参数"""
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if not github_output:
+        return
+    try:
+        sanitized_value = str(value).replace("\r", " ").replace("\n", " ").strip()
+        with open(github_output, "a", encoding="utf-8") as f:
+            f.write(f"{key}={sanitized_value}\n")
+    except Exception as e:
+        logger.warning(f"{LogEmoji.WARNING} 写入 GITHUB_OUTPUT 失败: {e}")
+
+
+def main() -> int:
     """主函数"""
+    exit_code = 0
+    failure_summary = ""
     try:
         # 1. 加载配置
         logger.info(f"{LogEmoji.START} 步骤 1: 加载配置")
@@ -581,6 +630,8 @@ def main():
         if not config.cookies_list:
             logger.error(f"{LogEmoji.ERROR} 未找到有效的 Cookie，退出程序。")
             title, content = "# 未找到 cookies!", ""
+            exit_code = 1
+            failure_summary = "配置缺失Cookie"
         else:
             # 2. 执行签到
             logger.info(f"{LogEmoji.START} 步骤 2: 执行签到")
@@ -594,9 +645,24 @@ def main():
                 f"\n{LogEmoji.END}========== 推送内容 ==========\n{title}\n{content}"
             )
 
+            if not checker.results:
+                exit_code = 1
+                failure_summary = "未产生签到结果"
+            else:
+                failed_cookies = checker.get_failed_cookies()
+                if failed_cookies:
+                    exit_code = 1
+                    failure_summary = "; ".join(
+                        f"账号{idx}签到失败" for idx in failed_cookies
+                    )
+                else:
+                    exit_code = 0
+
     except Exception as e:
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
         title, content = "# 脚本执行出错", str(e)
+        exit_code = 1
+        failure_summary = type(e).__name__
 
     # 4. 发送推送
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
@@ -604,6 +670,12 @@ def main():
     push_service.send(title, content)
     logger.info(f"{LogEmoji.END} 签到完成")
 
+    if exit_code != 0:
+        if failure_summary:
+            set_github_output("failure_summary", failure_summary)
+        return exit_code
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

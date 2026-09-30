@@ -46,6 +46,13 @@
 
 - 添加1个`repository secret`，命名为`PUSHDEER_SENDKEY`，其值对应 PushDeer key: ([获取地址](https://www.pushdeer.com/product.html))。
 
+5. Telegram 失败告警
+
+- 添加两个 repository secrets：`TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`。Bot 需要具备目标聊天的发送权限。
+- 只在签到或工作流执行失败时通知，内容包含失败账号摘要和对应 Actions 日志链接；依赖安装失败、运行异常和超时也会触发告警。
+- 同一 Cookie 任一域名签到成功或已经签到，即视为该账号成功；备用域名失败不会单独触发告警。任一账号所有域名均失败、缺少 Cookie 或执行异常时，脚本以非零状态退出，不再显示假成功。
+- Telegram API 未确认发送成功时，告警任务也会失败；临时网络错误最多尝试 3 次。积分兑换结果保持原逻辑，不作为签到失败判据。
+
 ### **star**自己的仓库
 
 ![图片加载失败](imgs/4.png)
