@@ -174,6 +174,15 @@ class Config:
         )
 
 
+DEVICE_USER_AGENTS = {
+    "macOS": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Linux": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "iPhone": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Android": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+}
+
+
 class API:
     """API 调用"""
 
@@ -214,7 +223,7 @@ class API:
         """获取请求头"""
         return {
             "origin": f"https://{self.domain}",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36",
+            "user-agent": DEVICE_USER_AGENTS["macOS"],
         }
 
     def _get_full_url(self, path: str) -> str:
@@ -275,8 +284,25 @@ class API:
 
         if response:
             data = response.json()
+            if data.get("code") == 4:
+                reason = data.get("reason")
+                login_device = data.get("loginDevice")
+                safe_reason = "device-mismatch" if reason == "device-mismatch" else "other"
+                safe_device = login_device if isinstance(login_device, str) and login_device in DEVICE_USER_AGENTS else "unknown"
+                logger.warning(
+                    f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] "
+                    f"{LogEmoji.WARNING} 签到被拒绝: reason={safe_reason}, loginDevice={safe_device}"
+                )
+                if reason == "device-mismatch":
+                    retry_ua = DEVICE_USER_AGENTS.get(safe_device)
+                    if retry_ua and retry_ua != self.headers["user-agent"]:
+                        self.headers["user-agent"] = retry_ua
+                        self.session.headers["user-agent"] = retry_ua
+                        response = self._make_request(url, "POST", checkin_data, cookies)
+                        data = response.json() if response else {"message": "网络请求失败"}
+
             code = data.get("code", 1)
-            message = data.get("message", "无消息字段")
+            message = "签到被服务端拒绝" if code == 4 else data.get("message", "无消息字段")
             points = str(data.get("points", 0))
 
             # 只记录必要的字段

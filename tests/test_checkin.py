@@ -1,10 +1,11 @@
 import os
 import runpy
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
 import checkin
-from checkin import CheckinResult, get_failed_cookies, set_github_output
+from checkin import API, DEVICE_USER_AGENTS, CheckinResult, get_failed_cookies, set_github_output
 
 
 @pytest.fixture(autouse=True)
@@ -200,10 +201,92 @@ def test_set_github_output_sanitizes_newlines(monkeypatch, tmp_path):
     assert content == "failure_summary=账号1签到失败 账号2签到失败\n"
 
 
+def test_mac_chrome_checkin_uses_mac_ua_without_retry():
+    response = MagicMock()
+    response.json.return_value = {"code": 0, "points": 3, "message": "签到成功"}
+    with API("glados.cloud", 1) as api:
+        with patch.object(api.session, "post", return_value=response) as post:
+            result = api.checkin("cookie1")
+        assert result["status"] == "签到成功"
+        assert post.call_count == 1
+        assert post.call_args.kwargs["headers"]["user-agent"] == DEVICE_USER_AGENTS["macOS"]
+
+
+def test_device_mismatch_retries_once_for_this_account_only(caplog):
+    mismatch = MagicMock()
+    mismatch.json.return_value = {
+        "code": 4,
+        "reason": "device-mismatch",
+        "loginDevice": "Windows",
+        "message": "Automated check-in detected",
+    }
+    success = MagicMock()
+    success.json.return_value = {"code": 1, "message": "already checked in"}
+    with API("glados.cloud", 1) as first:
+        with patch.object(first.session, "post", side_effect=[mismatch, success]) as post:
+            assert first.checkin("cookie1")["status"] == "重复签到"
+        assert [call.kwargs["headers"]["user-agent"] for call in post.call_args_list] == [
+            DEVICE_USER_AGENTS["macOS"], DEVICE_USER_AGENTS["Windows"]
+        ]
+        assert first.headers["user-agent"] == DEVICE_USER_AGENTS["Windows"]
+    with API("glados.cloud", 2) as second:
+        with patch.object(second.session, "post", return_value=success) as post:
+            assert second.checkin("cookie2")["status"] == "重复签到"
+        assert post.call_args.kwargs["headers"]["user-agent"] == DEVICE_USER_AGENTS["macOS"]
+    assert "cookie1" not in caplog.text
+    assert "cookie2" not in caplog.text
+
+
+@pytest.mark.parametrize("reason,device", [
+    ("other", "Windows"),
+    ("device-mismatch", "unknown-device"),
+    ("device-mismatch", "macOS"),
+])
+def test_checkin_does_not_retry_without_different_known_device(reason, device, caplog):
+    response = MagicMock()
+    response.json.return_value = {
+        "code": 4, "reason": reason, "loginDevice": device,
+        "message": "Automated check-in detected",
+    }
+    with API("glados.cloud", 1) as api:
+        with patch.object(api.session, "post", return_value=response) as post:
+            assert api.checkin("cookie1")["status"] == "签到失败"
+        assert post.call_count == 1
+    if device == "unknown-device":
+        assert "loginDevice=unknown" in caplog.text
+
+
+def test_checkin_logs_only_known_reason_and_device(caplog):
+    response = MagicMock()
+    response.json.return_value = {
+        "code": 4, "reason": "secret=never-log", "loginDevice": ["unexpected"],
+        "message": "Automated check-in detected secret=never-log",
+    }
+    with API("glados.cloud", 1) as api:
+        with patch.object(api.session, "post", return_value=response) as post:
+            assert api.checkin("cookie1")["status"] == "签到失败"
+        assert post.call_count == 1
+    assert "reason=other, loginDevice=unknown" in caplog.text
+    assert "secret=never-log" not in caplog.text
+
+
+def test_checkin_retries_at_most_once_when_mismatch_persists():
+    response = MagicMock()
+    response.json.return_value = {
+        "code": 4, "reason": "device-mismatch", "loginDevice": "Windows",
+        "message": "Automated check-in detected",
+    }
+    with API("glados.cloud", 1) as api:
+        with patch.object(api.session, "post", return_value=response) as post:
+            assert api.checkin("cookie1")["status"] == "签到失败"
+        assert post.call_count == 2
+
+
 def test_system_exit_in_dunder_main(monkeypatch):
     """测试 __main__ 调用 SystemExit(main())"""
+    monkeypatch.delenv("GLADOS_COOKIES", raising=False)
     with patch("checkin.main", return_value=1):
         with pytest.raises(SystemExit) as exc_info:
             # 模拟执行 checkin.py 的 __main__
-            runpy.run_path("/tmp/glados-notify.Oj7pfd/repo/checkin.py", run_name="__main__")
+            runpy.run_path(str(Path(__file__).resolve().parents[1] / "checkin.py"), run_name="__main__")
         assert exc_info.value.code == 1
