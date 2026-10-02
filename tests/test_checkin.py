@@ -1,8 +1,10 @@
+import json
 import os
 import runpy
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
+import requests
 
 import checkin
 from checkin import API, DEVICE_USER_AGENTS, CheckinResult, get_failed_cookies, set_github_output
@@ -282,11 +284,29 @@ def test_checkin_retries_at_most_once_when_mismatch_persists():
         assert post.call_count == 2
 
 
+def test_device_mismatch_on_http_403_is_retried_without_logging_response(caplog):
+    rejected = requests.Response()
+    rejected.status_code = 403
+    rejected._content = json.dumps({
+        "code": 4, "reason": "device-mismatch", "loginDevice": "Windows",
+        "message": "secret=never-log",
+    }).encode()
+    accepted = requests.Response()
+    accepted.status_code = 200
+    accepted._content = b'{"code": 1, "message": "already checked in"}'
+    with API("glados.cloud", 1) as api:
+        with patch.object(api.session, "post", side_effect=[rejected, accepted]) as post:
+            assert api.checkin("cookie1")["status"] == "重复签到"
+        assert post.call_count == 2
+        assert post.call_args.kwargs["headers"]["user-agent"] == DEVICE_USER_AGENTS["Windows"]
+    assert "secret=never-log" not in caplog.text
+
+
 def test_system_exit_in_dunder_main(monkeypatch):
     """测试 __main__ 调用 SystemExit(main())"""
     monkeypatch.delenv("GLADOS_COOKIES", raising=False)
-    with patch("checkin.main", return_value=1):
-        with pytest.raises(SystemExit) as exc_info:
-            # 模拟执行 checkin.py 的 __main__
-            runpy.run_path(str(Path(__file__).resolve().parents[1] / "checkin.py"), run_name="__main__")
-        assert exc_info.value.code == 1
+    monkeypatch.delenv("PUSHDEER_SENDKEY", raising=False)
+    with pytest.raises(SystemExit) as exc_info:
+        # 模拟执行 checkin.py 的 __main__
+        runpy.run_path(str(Path(__file__).resolve().parents[1] / "checkin.py"), run_name="__main__")
+    assert exc_info.value.code == 1

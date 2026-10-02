@@ -258,8 +258,15 @@ class API:
                 return None
 
             if not response.ok:
+                if url == self._get_full_url(self.CHECKIN_URL):
+                    try:
+                        error_data = response.json()
+                    except ValueError:
+                        error_data = None
+                    if isinstance(error_data, dict) and error_data.get("code") == 4:
+                        return response
                 logger.warning(
-                    f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] {LogEmoji.WARNING} 向 {url} 发起的请求失败，状态码 {response.status_code}。响应内容: {response.text}"
+                    f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] {LogEmoji.WARNING} 向 {url} 发起的请求失败，状态码 {response.status_code}。"
                 )
                 return None
             return response
@@ -282,7 +289,7 @@ class API:
 
         result = {"status": "签到失败", "points": "0", "message": ""}
 
-        if response:
+        if response is not None:
             data = response.json()
             if data.get("code") == 4:
                 reason = data.get("reason")
@@ -299,7 +306,7 @@ class API:
                         self.headers["user-agent"] = retry_ua
                         self.session.headers["user-agent"] = retry_ua
                         response = self._make_request(url, "POST", checkin_data, cookies)
-                        data = response.json() if response else {"message": "网络请求失败"}
+                        data = response.json() if response is not None else {"message": "网络请求失败"}
 
             code = data.get("code", 1)
             message = "签到被服务端拒绝" if code == 4 else data.get("message", "无消息字段")
