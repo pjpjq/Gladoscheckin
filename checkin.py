@@ -7,6 +7,8 @@ from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 from pypushdeer import PushDeer
 from logging_config import init_logger
+import re
+from gmail_auth import perform_gmail_login
 
 
 class CheckinStatus(Enum):
@@ -98,6 +100,7 @@ class Config:
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
+    ENV_GMAIL_ACCOUNTS = "GLADOS_GMAIL_ACCOUNTS"
 
     """默认兑换计划"""
     DEFAULT_EXCHANGE_PLAN = "plan500"
@@ -115,6 +118,7 @@ class Config:
     def __init__(self):
         self.push_key: str = ""
         self.cookies_list: List[str] = []
+        self.gmail_accounts: List[Tuple[str, str]] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
         self._load_config()
 
@@ -123,6 +127,22 @@ class Config:
         push_key_env: Optional[str] = os.environ.get(self.ENV_PUSH_KEY)
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
+        gmail_accounts_env: Optional[str] = os.environ.get(self.ENV_GMAIL_ACCOUNTS)
+
+        if gmail_accounts_env:
+            raw_accs = [
+                acc.strip()
+                for acc in re.split(r"[&\r\n]+", gmail_accounts_env)
+                if acc.strip()
+            ]
+            for item in raw_accs:
+                if ":" in item:
+                    email_user, app_pwd = item.split(":", 1)
+                    if email_user.strip() and app_pwd.strip():
+                        self.gmail_accounts.append((email_user.strip(), app_pwd.strip()))
+            logger.info(
+                f"{LogEmoji.INFO} 共加载了 {len(self.gmail_accounts)} 个 Gmail 自动续期账号。"
+            )
 
         if not push_key_env:
             logger.warning(
@@ -133,18 +153,29 @@ class Config:
             self.push_key = push_key_env
 
         if not raw_cookies_env:
-            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
-            self.cookies_list = []
+            if not self.gmail_accounts:
+                logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
+                self.cookies_list = []
+            else:
+                self.cookies_list = ["" for _ in self.gmail_accounts]
+                logger.info(
+                    f"{LogEmoji.INFO} 环境变量 '{self.ENV_COOKIES}' 未设置，将使用 {len(self.gmail_accounts)} 个 Gmail 账号自动登录。"
+                )
         else:
             self.cookies_list = [
                 cookie.strip()
                 for cookie in raw_cookies_env.split("&")
                 if cookie.strip()
             ]
-            if not self.cookies_list:
+            if not self.cookies_list and not self.gmail_accounts:
                 raise ValueError(
                     f"环境变量 '{self.ENV_COOKIES}' 已设置，但未包含任何有效的 Cookie。"
                 )
+            elif not self.cookies_list and self.gmail_accounts:
+                self.cookies_list = ["" for _ in self.gmail_accounts]
+            else:
+                while len(self.cookies_list) < len(self.gmail_accounts):
+                    self.cookies_list.append("")
 
         if not exchange_plan_env:
             logger.warning(
@@ -263,7 +294,7 @@ class API:
                         error_data = response.json()
                     except ValueError:
                         error_data = None
-                    if isinstance(error_data, dict) and error_data.get("code") == 4:
+                    if isinstance(error_data, dict) and error_data.get("code") in (-2, 4):
                         return response
                 logger.warning(
                     f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] {LogEmoji.WARNING} 向 {url} 发起的请求失败，状态码 {response.status_code}。"
@@ -287,7 +318,7 @@ class API:
         checkin_data = self._get_checkin_data()
         response = self._make_request(url, "POST", checkin_data, cookies)
 
-        result = {"status": "签到失败", "points": "0", "message": ""}
+        result = {"status": "签到失败", "points": "0", "message": "", "code": -1}
 
         if response is not None:
             data = response.json()
@@ -320,6 +351,7 @@ class API:
                 result["status"] = "签到成功"
                 result["points"] = points
                 result["message"] = message
+                result["code"] = code
             elif code == CheckinStatus.REPEAT.value:
                 logger.info(
                     f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] {LogEmoji.REPEAT} {{ code : {code}, message : {message} }}"
@@ -327,6 +359,7 @@ class API:
                 result["status"] = "重复签到"
                 result["points"] = "0"
                 result["message"] = message
+                result["code"] = code
             else:
                 logger.info(
                     f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] {LogEmoji.FAIL} {{ code : {code}, message : {message} }}"
@@ -334,12 +367,14 @@ class API:
                 result["status"] = "签到失败"
                 result["points"] = "0"
                 result["message"] = message
+                result["code"] = code
         else:
             logger.warning(
                 f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] {LogEmoji.WARNING} 签到失败"
             )
             result["status"] = "签到失败"
             result["message"] = "网络请求失败"
+            result["code"] = -1
 
         return result
 
@@ -492,22 +527,42 @@ class Checker:
     def __init__(self, config: Config):
         self.config = config
         self.results = []
+        self._renewed_accounts = set()
 
     def checkin_all(self):
         """执行所有签到任务"""
-        cookie_count = len(self.config.cookies_list)
+        account_count = max(len(self.config.cookies_list), len(self.config.gmail_accounts))
+        while len(self.config.cookies_list) < account_count:
+            self.config.cookies_list.append("")
+
         domain_count = len(self.config.DOMAINS)
-        total_tasks = cookie_count * domain_count
+        total_tasks = account_count * domain_count
         task_idx = 0
 
         logger.info(
-            f"{LogEmoji.INFO} 共 {cookie_count} 个 Cookie, {domain_count} 个域名, 共 {total_tasks} 个任务"
+            f"{LogEmoji.INFO} 共 {account_count} 个 Cookie, {domain_count} 个域名, 共 {total_tasks} 个任务"
         )
 
         for cookie_idx, cookie in enumerate(self.config.cookies_list, 1):
             logger.info(
                 f"{LogEmoji.START} ========== 开始处理 Cookie {cookie_idx} =========="
             )
+            gmail_acc = (
+                self.config.gmail_accounts[cookie_idx - 1]
+                if self.config.gmail_accounts and cookie_idx <= len(self.config.gmail_accounts)
+                else None
+            )
+            if not cookie and gmail_acc and cookie_idx not in self._renewed_accounts:
+                self._renewed_accounts.add(cookie_idx)
+                logger.info(
+                    f"{LogEmoji.COOKIE}[{cookie_idx}] 未配置初始 Cookie，尝试通过 Gmail 接码自动登录..."
+                )
+                new_cookie = perform_gmail_login(
+                    gmail_acc[0], gmail_acc[1], domain=self.config.DOMAINS[0]
+                )
+                if new_cookie:
+                    cookie = new_cookie
+                    self.config.cookies_list[cookie_idx - 1] = new_cookie
 
             for domain in self.config.DOMAINS:
                 task_idx += 1
@@ -516,6 +571,7 @@ class Checker:
                 )
 
                 result = self._checkin_on_domain(cookie, cookie_idx, domain)
+                cookie = self.config.cookies_list[cookie_idx - 1]
                 self.results.append(result)
 
                 logger.info(
@@ -528,6 +584,11 @@ class Checker:
     ) -> CheckinResult:
         """在指定域名上执行签到"""
         result = CheckinResult(cookie_idx, domain)
+        gmail_acc = (
+            self.config.gmail_accounts[cookie_idx - 1]
+            if self.config.gmail_accounts and cookie_idx <= len(self.config.gmail_accounts)
+            else None
+        )
 
         # 使用上下文管理器管理API对象的生命周期
         with API(domain, cookie_idx) as api:
@@ -536,6 +597,31 @@ class Checker:
                 f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] {LogEmoji.CHECKIN} 执行签到"
             )
             checkin_result = api.checkin(cookie)
+
+            # 若 Cookie 过期/无权限 (code: -2) 且配置了 Gmail 账号，尝试自动接码续期
+            if (
+                checkin_result.get("code") == -2
+                and gmail_acc
+                and cookie_idx not in self._renewed_accounts
+            ):
+                self._renewed_accounts.add(cookie_idx)
+                logger.warning(
+                    f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] "
+                    f"{LogEmoji.WARNING} Cookie 已过期或无权限 (code: -2)，尝试通过 Gmail 接码自动重新登录..."
+                )
+                new_cookie = perform_gmail_login(
+                    gmail_acc[0], gmail_acc[1], domain=domain
+                )
+                if new_cookie:
+                    logger.info(
+                        f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] "
+                        f"{LogEmoji.SUCCESS} Gmail 自动续期成功，重新执行签到..."
+                    )
+                    cookie = new_cookie
+                    if cookie_idx <= len(self.config.cookies_list):
+                        self.config.cookies_list[cookie_idx - 1] = new_cookie
+                    checkin_result = api.checkin(cookie)
+
             result.status = checkin_result["status"]
             result.points = checkin_result["points"]
 

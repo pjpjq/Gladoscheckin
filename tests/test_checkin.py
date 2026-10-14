@@ -310,3 +310,86 @@ def test_system_exit_in_dunder_main(monkeypatch):
         # 模拟执行 checkin.py 的 __main__
         runpy.run_path(str(Path(__file__).resolve().parents[1] / "checkin.py"), run_name="__main__")
     assert exc_info.value.code == 1
+
+
+def test_config_loads_gmail_accounts_formats(monkeypatch):
+    """测试多格式 Gmail 账号解析 (支持换行与 & 分隔)"""
+    monkeypatch.setenv(
+        "GLADOS_GMAIL_ACCOUNTS",
+        "acc1@gmail.com:pass1\nacc2@gmail.com:pass2&acc3@gmail.com:pass3\n",
+    )
+    monkeypatch.delenv("GLADOS_COOKIES", raising=False)
+    cfg = checkin.Config()
+    assert len(cfg.gmail_accounts) == 3
+    assert cfg.gmail_accounts[0] == ("acc1@gmail.com", "pass1")
+    assert cfg.gmail_accounts[1] == ("acc2@gmail.com", "pass2")
+    assert cfg.gmail_accounts[2] == ("acc3@gmail.com", "pass3")
+    assert len(cfg.cookies_list) == 3
+
+
+def test_expired_cookie_auto_renews_with_gmail(monkeypatch):
+    """测试 Cookie 过期 (code: -2) 时自动调用 Gmail 接码重新登录并重试"""
+    monkeypatch.setenv("GLADOS_COOKIES", "expired_cookie")
+    monkeypatch.setenv("GLADOS_GMAIL_ACCOUNTS", "user@gmail.com:app-pass")
+
+    cfg = checkin.Config()
+    checker = checkin.Checker(cfg)
+
+    call_count = 0
+
+    def mock_checkin(api_self, cookie):
+        nonlocal call_count
+        call_count += 1
+        if cookie == "expired_cookie":
+            return {"status": "签到失败", "points": "0", "message": "Please Login", "code": -2}
+        return {"status": "签到成功", "points": "10", "message": "Checkin OK", "code": 0}
+
+    with patch("checkin.API.checkin", mock_checkin), \
+         patch("checkin.API.get_status", return_value="100"), \
+         patch("checkin.API.get_points", return_value=("200", 200)), \
+         patch("checkin.API.exchange", return_value="未兑换"), \
+         patch("checkin.perform_gmail_login", return_value="renewed_cookie_999") as mock_login:
+
+        result = checker._checkin_on_domain("expired_cookie", 1, "glados.cloud")
+        assert result.status == "签到成功"
+        assert result.points == "10"
+        assert checker.config.cookies_list[0] == "renewed_cookie_999"
+        mock_login.assert_called_once_with("user@gmail.com", "app-pass", domain="glados.cloud")
+        assert call_count == 2
+
+
+def test_only_gmail_accounts_configured_auto_logins(monkeypatch):
+    """测试仅配置 Gmail 账号无初始 Cookie 时，自动先登录再签到"""
+    monkeypatch.delenv("GLADOS_COOKIES", raising=False)
+    monkeypatch.setenv("GLADOS_GMAIL_ACCOUNTS", "only_user@gmail.com:pass")
+
+    cfg = checkin.Config()
+    checker = checkin.Checker(cfg)
+
+    with patch("checkin.perform_gmail_login", return_value="fresh_cookie_1") as mock_login, \
+         patch("checkin.Checker._checkin_on_domain") as mock_domain_check:
+        mock_domain_check.return_value = CheckinResult(1, "glados.cloud", status="签到成功", points="10")
+
+        checker.checkin_all()
+
+        mock_login.assert_called_once_with("only_user@gmail.com", "pass", domain="glados.cloud")
+        assert checker.config.cookies_list[0] == "fresh_cookie_1"
+
+
+def test_gmail_renewal_failure_fallback(monkeypatch):
+    """测试 Gmail 接码登录失败时的优雅降级"""
+    monkeypatch.setenv("GLADOS_COOKIES", "expired_cookie")
+    monkeypatch.setenv("GLADOS_GMAIL_ACCOUNTS", "user@gmail.com:app-pass")
+
+    cfg = checkin.Config()
+    checker = checkin.Checker(cfg)
+
+    with patch("checkin.API.checkin", return_value={"status": "签到失败", "points": "0", "message": "Please Login", "code": -2}), \
+         patch("checkin.API.get_status", return_value="获取失败"), \
+         patch("checkin.API.get_points", return_value=("获取失败", 0)), \
+         patch("checkin.API.exchange", return_value="未兑换"), \
+         patch("checkin.perform_gmail_login", return_value=None) as mock_login:
+
+        result = checker._checkin_on_domain("expired_cookie", 1, "glados.cloud")
+        assert result.status == "签到失败"
+        mock_login.assert_called_once()
