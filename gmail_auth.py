@@ -330,7 +330,8 @@ def perform_gmail_login(
         try:
             with GmailReader(email_address, app_password) as reader:
                 code = reader.fetch_latest_code(
-                    min_timestamp=t0 - 30,
+                    # 允许验证码邮件在 CI 排队或邮件投递延迟后仍被使用。
+                    min_timestamp=t0 - 5 * 60,
                     timeout=timeout,
                     poll_interval=poll_interval,
                 )

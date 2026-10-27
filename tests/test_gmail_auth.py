@@ -132,17 +132,24 @@ def test_gmail_reader_fetch_latest_code():
 
 
 def test_perform_gmail_login_flow():
+    fetch_mock = MagicMock(return_value="654321")
     with patch(
         "gmail_auth.GLaDOSAuthenticator.send_verification_code", return_value=True
     ), patch(
-        "gmail_auth.GmailReader.connect", return_value=MagicMock()
+        # connect 返回 reader 本身，确保 with 块内调用的是被 patch 的 fetch_latest_code。
+        "gmail_auth.GmailReader.connect", autospec=True, side_effect=lambda reader: reader
     ), patch(
-        "gmail_auth.GmailReader.fetch_latest_code", return_value="654321"
+        "gmail_auth.GmailReader.close"
+    ), patch(
+        "gmail_auth.GmailReader.fetch_latest_code", fetch_mock
     ), patch(
         "gmail_auth.GLaDOSAuthenticator.login_with_code", return_value="koa:sess=test_ok"
+    ), patch(
+        "gmail_auth.time.time", return_value=1000
     ):
         cookie = perform_gmail_login("test@gmail.com", "app_password_123")
         assert cookie == "koa:sess=test_ok"
+    assert fetch_mock.call_args.kwargs["min_timestamp"] == 700
 
 
 def test_perform_gmail_login_missing_credentials():
