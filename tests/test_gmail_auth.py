@@ -41,6 +41,24 @@ def test_authenticator_send_verification_code_success():
         assert payload["site"] == "glados.network"
 
 
+def test_authenticator_send_verification_code_requires_captcha(caplog):
+    auth = GLaDOSAuthenticator("glados.cloud")
+    mock_resp = MagicMock(spec=requests.Response)
+    mock_resp.ok = True
+    mock_resp.json.return_value = {
+        "code": 0,
+        "captcha_required": True,
+        "sitekey": "do-not-log",
+    }
+
+    with patch.object(auth.session, "post", return_value=mock_resp):
+        assert auth.send_verification_code("user@example.com") is False
+
+    assert "人机验证" in caplog.text
+    assert "发码请求成功" not in caplog.text
+    assert "do-not-log" not in caplog.text
+
+
 def test_authenticator_send_verification_code_failure():
     auth = GLaDOSAuthenticator("glados.cloud")
     mock_resp = MagicMock(spec=requests.Response)

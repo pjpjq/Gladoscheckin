@@ -84,6 +84,9 @@ class GLaDOSAuthenticator:
                 return False
             data = resp.json()
             code = data.get("code")
+            if data.get("captcha_required"):
+                logger.warning("GLaDOS 要求人机验证，验证码尚未发送，停止自动收码")
+                return False
             if code == 0:
                 logger.info(f"验证码发码请求成功: {data.get('message', 'ok')}")
                 return True
