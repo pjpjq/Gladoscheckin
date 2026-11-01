@@ -393,3 +393,69 @@ def test_gmail_renewal_failure_fallback(monkeypatch):
         result = checker._checkin_on_domain("expired_cookie", 1, "glados.cloud")
         assert result.status == "签到失败"
         mock_login.assert_called_once()
+
+
+def test_sync_cookies_to_secret_missing_credentials(monkeypatch):
+    """测试缺失 GH_PAT 或 GITHUB_REPOSITORY 时跳过同步"""
+    monkeypatch.delenv("GH_PAT", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    assert not checkin.sync_cookies_to_secret(["cookie1", "cookie2"])
+
+
+def test_sync_cookies_to_secret_empty_items(monkeypatch):
+    """测试 Cookie 列表包含空项时拒绝同步"""
+    monkeypatch.setenv("GH_PAT", "dummy_token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "pjpjq/Gladoscheckin")
+    assert not checkin.sync_cookies_to_secret(["cookie1", ""])
+
+
+def test_sync_cookies_to_secret_success(monkeypatch):
+    """测试正常调用 gh secret set 同步 Cookie"""
+    monkeypatch.setenv("GH_PAT", "dummy_token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "pjpjq/Gladoscheckin")
+
+    mock_run = MagicMock(return_value=MagicMock(returncode=0))
+    monkeypatch.setattr(checkin.subprocess, "run", mock_run)
+
+    assert checkin.sync_cookies_to_secret(["cookie1", "cookie2"])
+    mock_run.assert_called_once()
+    args, kwargs = mock_run.call_args
+    assert args[0] == ["gh", "secret", "set", "GLADOS_COOKIES", "-R", "pjpjq/Gladoscheckin"]
+    assert kwargs["input"] == b"cookie1&cookie2"
+    assert kwargs["env"]["GH_TOKEN"] == "dummy_token"
+
+
+def test_sync_cookies_to_secret_cli_failure(monkeypatch):
+    """测试 gh secret set 失败时优雅处理并返回 False"""
+    monkeypatch.setenv("GH_PAT", "dummy_token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "pjpjq/Gladoscheckin")
+
+    mock_run = MagicMock(return_value=MagicMock(returncode=1, stderr=b"auth error"))
+    monkeypatch.setattr(checkin.subprocess, "run", mock_run)
+
+    assert not checkin.sync_cookies_to_secret(["cookie1", "cookie2"])
+
+
+def test_main_triggers_sync_on_renewed_accounts(monkeypatch, tmp_path):
+    """测试签到成功且存在自动续期账号时触发同步并设置输出"""
+    output_file = tmp_path / "github_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    monkeypatch.setenv("GLADOS_COOKIES", "cookie1")
+
+    sync_mock = MagicMock(return_value=True)
+    monkeypatch.setattr(checkin, "sync_cookies_to_secret", sync_mock)
+
+    def mock_checkin(self):
+        self.results = [
+            CheckinResult(cookie_index=1, domain="glados.cloud", status="签到成功"),
+        ]
+        self._renewed_accounts.add(1)
+
+    with patch.object(checkin.Checker, "checkin_all", mock_checkin):
+        exit_code = checkin.main()
+        assert exit_code == 0
+
+    sync_mock.assert_called_once_with(["cookie1"])
+    content = output_file.read_text(encoding="utf-8")
+    assert "cookies_renewed=true" in content

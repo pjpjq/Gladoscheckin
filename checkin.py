@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+import subprocess
 import logging
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
@@ -101,6 +102,7 @@ class Config:
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_GMAIL_ACCOUNTS = "GLADOS_GMAIL_ACCOUNTS"
+    ENV_GH_PAT = "GH_PAT"
 
     """默认兑换计划"""
     DEFAULT_EXCHANGE_PLAN = "plan500"
@@ -737,6 +739,48 @@ def set_github_output(key: str, value: str) -> None:
         logger.warning(f"{LogEmoji.WARNING} 写入 GITHUB_OUTPUT 失败: {e}")
 
 
+def sync_cookies_to_secret(cookies: List[str]) -> bool:
+    """当发生接码续期且签到全部成功时，同步最新 Cookie 到 GitHub Secrets (GLADOS_COOKIES)。"""
+    gh_pat = os.environ.get(Config.ENV_GH_PAT) or os.environ.get("GH_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not gh_pat or not repo:
+        logger.info(
+            f"{LogEmoji.INFO} 未提供 GH_PAT 或 GITHUB_REPOSITORY，跳过同步 GitHub Secrets。"
+        )
+        return False
+
+    valid_cookies = [c.strip() for c in cookies if c and c.strip()]
+    if not valid_cookies or len(valid_cookies) != len(cookies):
+        logger.warning(
+            f"{LogEmoji.WARNING} Cookie 列表中存在空项或无效项，跳过同步 GitHub Secrets。"
+        )
+        return False
+
+    cookie_body = "&".join(valid_cookies)
+    try:
+        env = os.environ.copy()
+        env["GH_TOKEN"] = gh_pat
+        res = subprocess.run(
+            ["gh", "secret", "set", Config.ENV_COOKIES, "-R", repo],
+            input=cookie_body.encode("utf-8"),
+            env=env,
+            capture_output=True,
+            timeout=30,
+        )
+        if res.returncode == 0:
+            logger.info(
+                f"{LogEmoji.SUCCESS} 已成功将最新静态 Cookie 同步更新至 GitHub Secrets ({Config.ENV_COOKIES})。"
+            )
+            return True
+        logger.warning(
+            f"{LogEmoji.WARNING} 同步 GitHub Secrets 失败 (code {res.returncode}): {res.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+        return False
+    except Exception as e:
+        logger.warning(f"{LogEmoji.WARNING} 调用 gh secret set 同步发生异常: {e}")
+        return False
+
+
 def main() -> int:
     """主函数"""
     exit_code = 0
@@ -776,6 +820,9 @@ def main() -> int:
                     )
                 else:
                     exit_code = 0
+                    if getattr(checker, "_renewed_accounts", None) or os.environ.get("FORCE_SYNC_COOKIES") == "true":
+                        if sync_cookies_to_secret(checker.config.cookies_list):
+                            set_github_output("cookies_renewed", "true")
 
     except Exception as e:
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")

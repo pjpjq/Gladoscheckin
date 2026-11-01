@@ -49,6 +49,7 @@ jobs:
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
         GLADOS_GMAIL_ACCOUNTS: ${{ secrets.GLADOS_GMAIL_ACCOUNTS }}
+        GH_PAT: ${{ secrets.GH_PAT }}
 
     - name: keep alive
       uses: liskin/gh-workflow-keepalive@v1 # using the workflow with default settings
