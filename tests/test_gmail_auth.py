@@ -185,3 +185,16 @@ def test_perform_gmail_login_code_timeout():
     ):
         assert perform_gmail_login("test@gmail.com", "app_password_123") is None
 
+
+def test_perform_gmail_login_respects_custom_timeout(monkeypatch):
+    monkeypatch.setenv("GLADOS_AUTH_TIMEOUT", "240")
+    fetch_mock = MagicMock(return_value="123456")
+    with patch("gmail_auth.GLaDOSAuthenticator.send_verification_code", return_value=True), \
+         patch("gmail_auth.GmailReader.connect", autospec=True, side_effect=lambda r: r), \
+         patch("gmail_auth.GmailReader.close"), \
+         patch("gmail_auth.GmailReader.fetch_latest_code", fetch_mock), \
+         patch("gmail_auth.GLaDOSAuthenticator.login_with_code", return_value="sess=abc"):
+        res = perform_gmail_login("user@gmail.com", "pass")
+        assert res == "sess=abc"
+    assert fetch_mock.call_args.kwargs["timeout"] == 240
+

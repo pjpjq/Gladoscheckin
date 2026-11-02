@@ -530,6 +530,8 @@ class Checker:
         self.config = config
         self.results = []
         self._renewed_accounts = set()
+        self._attempted_renewal = set()
+        self._valid_accounts = set()
 
     def checkin_all(self):
         """执行所有签到任务"""
@@ -554,8 +556,8 @@ class Checker:
                 if self.config.gmail_accounts and cookie_idx <= len(self.config.gmail_accounts)
                 else None
             )
-            if not cookie and gmail_acc and cookie_idx not in self._renewed_accounts:
-                self._renewed_accounts.add(cookie_idx)
+            if not cookie and gmail_acc and cookie_idx not in self._attempted_renewal:
+                self._attempted_renewal.add(cookie_idx)
                 logger.info(
                     f"{LogEmoji.COOKIE}[{cookie_idx}] 未配置初始 Cookie，尝试通过 Gmail 接码自动登录..."
                 )
@@ -563,6 +565,7 @@ class Checker:
                     gmail_acc[0], gmail_acc[1], domain=self.config.DOMAINS[0]
                 )
                 if new_cookie:
+                    self._renewed_accounts.add(cookie_idx)
                     cookie = new_cookie
                     self.config.cookies_list[cookie_idx - 1] = new_cookie
 
@@ -604,9 +607,10 @@ class Checker:
             if (
                 checkin_result.get("code") == -2
                 and gmail_acc
-                and cookie_idx not in self._renewed_accounts
+                and cookie_idx not in self._attempted_renewal
+                and cookie_idx not in self._valid_accounts
             ):
-                self._renewed_accounts.add(cookie_idx)
+                self._attempted_renewal.add(cookie_idx)
                 logger.warning(
                     f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] "
                     f"{LogEmoji.WARNING} Cookie 已过期或无权限 (code: -2)，尝试通过 Gmail 接码自动重新登录..."
@@ -615,6 +619,7 @@ class Checker:
                     gmail_acc[0], gmail_acc[1], domain=domain
                 )
                 if new_cookie:
+                    self._renewed_accounts.add(cookie_idx)
                     logger.info(
                         f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] "
                         f"{LogEmoji.SUCCESS} Gmail 自动续期成功，重新执行签到..."
@@ -623,6 +628,9 @@ class Checker:
                     if cookie_idx <= len(self.config.cookies_list):
                         self.config.cookies_list[cookie_idx - 1] = new_cookie
                     checkin_result = api.checkin(cookie)
+
+            if checkin_result.get("status") in ("签到成功", "重复签到"):
+                self._valid_accounts.add(cookie_idx)
 
             result.status = checkin_result["status"]
             result.points = checkin_result["points"]

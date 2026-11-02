@@ -5,7 +5,8 @@ import imaplib
 import logging
 import re
 import time
-from typing import Optional
+import os
+from typing import Optional, Sequence, Union
 
 import requests
 
@@ -220,7 +221,10 @@ class GmailReader:
         return None
 
     def _check_mailbox(
-        self, mailbox: str, min_timestamp: float, sender_keyword: str
+        self,
+        mailbox: str,
+        min_timestamp: float,
+        sender_keyword: Union[str, Sequence[str]] = ("glados", "railgun"),
     ) -> Optional[str]:
         """在指定的邮箱文件夹中查找最新验证码"""
         if not self.mail:
@@ -232,21 +236,29 @@ class GmailReader:
         except Exception:
             return None
 
-        msg_ids = []
-        try:
-            status, data = self.mail.search(None, f'(FROM "{sender_keyword}")')
-            if status == "OK" and data and data[0]:
-                msg_ids = data[0].split()
-        except Exception:
-            pass
+        keywords = (
+            [sender_keyword]
+            if isinstance(sender_keyword, str)
+            else list(sender_keyword)
+        )
 
-        if not msg_ids:
+        msg_ids = []
+        for kw in keywords:
             try:
-                status, data = self.mail.search(None, f'(SUBJECT "{sender_keyword}")')
+                status, data = self.mail.search(None, f'(FROM "{kw}")')
                 if status == "OK" and data and data[0]:
-                    msg_ids = data[0].split()
+                    msg_ids.extend(data[0].split())
             except Exception:
                 pass
+
+        if not msg_ids:
+            for kw in keywords:
+                try:
+                    status, data = self.mail.search(None, f'(SUBJECT "{kw}")')
+                    if status == "OK" and data and data[0]:
+                        msg_ids.extend(data[0].split())
+                except Exception:
+                    pass
 
         if not msg_ids:
             try:
@@ -255,6 +267,9 @@ class GmailReader:
                     msg_ids = data[0].split()[-5:]
             except Exception:
                 pass
+        else:
+            seen = set()
+            msg_ids = [m for m in msg_ids if not (m in seen or seen.add(m))]
 
         for mid in reversed(msg_ids):
             try:
@@ -275,7 +290,7 @@ class GmailReader:
 
                 sender = msg.get("From", "").lower()
                 subject = msg.get("Subject", "").lower()
-                if sender_keyword not in sender and sender_keyword not in subject:
+                if not any(kw.lower() in sender or kw.lower() in subject for kw in keywords):
                     continue
 
                 body = self.extract_body(msg)
@@ -291,9 +306,9 @@ class GmailReader:
     def fetch_latest_code(
         self,
         min_timestamp: Optional[float] = None,
-        timeout: int = 60,
+        timeout: int = 180,
         poll_interval: int = 3,
-        sender_keyword: str = "glados",
+        sender_keyword: Union[str, Sequence[str]] = ("glados", "railgun"),
     ) -> Optional[str]:
         """轮询 Gmail 获取符合时间戳条件的最新验证码"""
         start_time = time.time()
@@ -313,7 +328,7 @@ def perform_gmail_login(
     email_address: str,
     app_password: str,
     domain: str = "glados.cloud",
-    timeout: int = 60,
+    timeout: Optional[int] = None,
     poll_interval: int = 3,
     user_agent: Optional[str] = None,
 ) -> Optional[str]:
@@ -321,6 +336,12 @@ def perform_gmail_login(
     if not email_address or not app_password:
         logger.warning("未提供有效的 Gmail 地址或应用密码，跳过接码登录")
         return None
+
+    if timeout is None:
+        try:
+            timeout = int(os.environ.get("GLADOS_AUTH_TIMEOUT", "180"))
+        except ValueError:
+            timeout = 180
 
     t0 = time.time()
     with GLaDOSAuthenticator(domain=domain, user_agent=user_agent) as auth:

@@ -459,3 +459,33 @@ def test_main_triggers_sync_on_renewed_accounts(monkeypatch, tmp_path):
     sync_mock.assert_called_once_with(["cookie1"])
     content = output_file.read_text(encoding="utf-8")
     assert "cookies_renewed=true" in content
+
+
+def test_checkin_skips_renewal_on_secondary_domain_when_already_valid(monkeypatch):
+    """测试账号在主域名已成功签到后，次级域名返回 -2 时不会误触发接码续期"""
+    monkeypatch.setenv("GLADOS_COOKIES", "valid_cookie")
+    monkeypatch.setenv("GLADOS_GMAIL_ACCOUNTS", "user@gmail.com:app-pass")
+
+    cfg = checkin.Config()
+    checker = checkin.Checker(cfg)
+
+    def mock_checkin(api_self, cookie):
+        if api_self.domain == "glados.cloud":
+            return {"status": "签到成功", "points": "10", "message": "Checkin OK", "code": 0}
+        return {"status": "签到失败", "points": "0", "message": "No permission", "code": -2}
+
+    with patch("checkin.API.checkin", mock_checkin), \
+         patch("checkin.API.get_status", return_value="100"), \
+         patch("checkin.API.get_points", return_value=("200", 200)), \
+         patch("checkin.API.exchange", return_value="未兑换"), \
+         patch("checkin.perform_gmail_login") as mock_login:
+
+        checker.checkin_all()
+
+        mock_login.assert_not_called()
+        assert len(checker.results) == 2
+        assert checker.results[0].status == "签到成功"
+        assert checker.results[1].status == "签到失败"
+        assert 1 in checker._valid_accounts
+        assert len(checker._renewed_accounts) == 0
+        assert checker.get_failed_cookies() == []
