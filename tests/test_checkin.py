@@ -489,3 +489,77 @@ def test_checkin_skips_renewal_on_secondary_domain_when_already_valid(monkeypatc
         assert 1 in checker._valid_accounts
         assert len(checker._renewed_accounts) == 0
         assert checker.get_failed_cookies() == []
+
+
+@pytest.mark.parametrize("plan,required_points", [
+    ("plan100", 100), ("plan200", 200), ("plan500", 500),
+])
+def test_exchange_sends_form_encoded_plan(plan, required_points):
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b'{"code": 0, "message": "Exchange success"}'
+    with API("glados.cloud", 1) as api:
+        with patch.object(api.session, "send", return_value=response) as send:
+            assert api.exchange("cookie1", plan, required_points) == f"兑换成功: {plan}"
+        send.assert_called_once()
+        request = send.call_args.args[0]
+        assert request.body == f"planType={plan}"
+        assert request.headers["Content-Type"] == "application/x-www-form-urlencoded"
+        assert request.headers["cookie"] == "cookie1"
+
+
+def test_exchange_encoding_does_not_change_checkin_body():
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b'{"code": 1, "message": "already checked in"}'
+    with API("glados.cloud", 1) as api:
+        with patch.object(api.session, "send", return_value=response) as send:
+            assert api.checkin("cookie1")["status"] == "重复签到"
+        assert json.loads(send.call_args.args[0].body) == {"token": "glados.cloud"}
+
+
+@pytest.mark.parametrize("points,expected", [
+    (("348 积分", 348), "跳过兑换: 积分不足 (348/500)"),
+    (("1 积分", 1), "跳过兑换: 积分不足 (1/500)"),
+    (("499 积分", 499), "跳过兑换: 积分不足 (499/500)"),
+    (("获取失败", 0), "跳过兑换: 积分查询失败"),
+])
+def test_exchange_skips_insufficient_or_unknown_points(monkeypatch, points, expected):
+    monkeypatch.setenv("GLADOS_COOKIES", "cookie1")
+    monkeypatch.setenv("GLADOS_EXCHANGE_PLAN", "plan500")
+    monkeypatch.delenv("GLADOS_GMAIL_ACCOUNTS", raising=False)
+    checker = checkin.Checker(checkin.Config())
+    with patch("checkin.API.checkin", return_value={"status": "重复签到", "points": "0"}), \
+         patch("checkin.API.get_status", return_value="100 天"), \
+         patch("checkin.API.get_points", return_value=points), \
+         patch("checkin.API.exchange") as exchange:
+        result = checker._checkin_on_domain("cookie1", 1, "glados.cloud")
+    exchange.assert_not_called()
+    assert result.exchange == expected
+
+
+@pytest.mark.parametrize("balance,exchange_result,expected_points,expected_days,reads", [
+    (500, "兑换成功: plan500", "0 积分", "200 天", 2),
+    (704, "兑换成功: plan500", "204 积分", "200 天", 2),
+    (704, "兑换失败: server error", "704 积分", "100 天", 1),
+])
+def test_exchange_threshold_and_success_refresh(
+    monkeypatch, balance, exchange_result, expected_points, expected_days, reads
+):
+    monkeypatch.setenv("GLADOS_COOKIES", "cookie1")
+    monkeypatch.setenv("GLADOS_EXCHANGE_PLAN", "plan500")
+    monkeypatch.delenv("GLADOS_GMAIL_ACCOUNTS", raising=False)
+    checker = checkin.Checker(checkin.Config())
+    with patch("checkin.API.checkin", return_value={"status": "重复签到", "points": "0"}), \
+         patch("checkin.API.get_status", side_effect=["100 天", "200 天"]) as status, \
+         patch("checkin.API.get_points", side_effect=[
+             (f"{balance} 积分", balance), (f"{balance - 500} 积分", balance - 500),
+         ]) as points, \
+         patch("checkin.API.exchange", return_value=exchange_result) as exchange:
+        result = checker._checkin_on_domain("cookie1", 1, "glados.cloud")
+    exchange.assert_called_once_with("cookie1", "plan500", 500)
+    assert result.exchange == exchange_result
+    assert result.points_total == expected_points
+    assert result.days == expected_days
+    assert points.call_count == reads
+    assert status.call_count == reads

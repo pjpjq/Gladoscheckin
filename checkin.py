@@ -275,7 +275,7 @@ class API:
                 response = self.session.post(
                     url,
                     headers=session_headers,
-                    data=json.dumps(data),
+                    data=data if url == self._get_full_url(self.EXCHANGE_URL) else json.dumps(data),
                     timeout=(60, 120),  # 连接超时 60 秒，读取超时 120 秒
                 )
             elif method.upper() == "GET":
@@ -652,12 +652,20 @@ class Checker:
             required_points = self.config.EXCHANGE_PLANS.get(
                 self.config.exchange_plan, 500
             )
-            logger.info(
-                f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] {LogEmoji.EXCHANGE} 开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)"
-            )
-            result.exchange = api.exchange(
-                cookie, self.config.exchange_plan, required_points
-            )
+            if points_str == "获取失败":
+                result.exchange = "跳过兑换: 积分查询失败"
+            elif points_num < required_points:
+                result.exchange = f"跳过兑换: 积分不足 ({points_num}/{required_points})"
+            else:
+                logger.info(
+                    f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] {LogEmoji.EXCHANGE} 开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)"
+                )
+                result.exchange = api.exchange(
+                    cookie, self.config.exchange_plan, required_points
+                )
+                if result.exchange.startswith("兑换成功:"):
+                    result.days = api.get_status(cookie)
+                    result.points_total, _ = api.get_points(cookie)
 
         return result
 
